@@ -12,6 +12,8 @@ import pandas as pd
 import streamlit as st
 import pyaudio
 import wave
+import folium
+from streamlit_folium import st_folium
 from configparser import ConfigParser
 from pydub import AudioSegment
 import speech_recognition as sr
@@ -723,7 +725,7 @@ class TweetScraper:
 # Modified handle_enter function
 def handle_enter():
     current_text = st.session_state.text_prompt
-    #Enter Tavily API KEY HERE
+    # Enter Tavily API 
     api_key = ""
     max_articles = 5
 
@@ -782,6 +784,71 @@ def handle_enter():
         # Set a flag to indicate we need to clear the input on next rerun
         st.session_state.clear_input = True
 
+class Map:
+    # Function to fetch ongoing disasters from ReliefWeb API
+    @st.cache_data(ttl=3600)  # Cache for 1 hour
+    def fetch_ongoing_disasters(_self=None):  # Add _self parameter to avoid hashing issues
+        url = "https://api.reliefweb.int/v1/disasters"
+        params = {
+            "appname": "disaster-map",
+            "filter[field]": "status",
+            "filter[value]": "ongoing",
+            "limit": 100,  # Adjust as needed
+            "fields[include][]": ["name", "date.created", "country", "description", "primary_type.name"],
+            "sort[]": "date.created:desc"
+        }
+
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json().get("data", [])
+
+            # Process disasters
+            disasters = []
+            for item in data:
+                fields = item.get("fields", {})
+                disaster = {
+                    "id": item.get("id", ""),
+                    "name": fields.get("name", "Unknown"),
+                    "type": fields.get("primary_type", {}).get("name", "Unknown"),
+                    "description": fields.get("description", "No description available")[:200] + "...",
+                    "date": fields.get("date", {}).get("created", ""),
+                    "countries": []
+                }
+                # Extract country details
+                for country in fields.get("country", []):
+                    country_info = {
+                        "name": country.get("name", "Unknown"),
+                        "lat": country.get("location", {}).get("lat", None),
+                        "lon": country.get("location", {}).get("lon", None)
+                    }
+                    disaster["countries"].append(country_info)
+                disasters.append(disaster)
+            return disasters
+        except requests.RequestException as e:
+            st.error(f"Error fetching data: {e}")
+            return []
+
+    # Function to create a Folium map with disaster markers
+    def create_disaster_map(self, disasters):
+        # Initialize map centered on the world
+        m = folium.Map(location=[0, 0], zoom_start=2, tiles="OpenStreetMap")
+
+        # Add markers for each disaster's countries
+        for disaster in disasters:
+            for country in disaster["countries"]:
+                lat = country.get("lat")
+                lon = country.get("lon")
+                if lat is not None and lon is not None:
+                    popup_text = f"<b>{disaster['name']}</b><br>Type: {disaster['type']}<br>Country: {country['name']}"
+                    folium.Marker(
+                        location=[lat, lon],
+                        popup=popup_text,
+                        icon=folium.Icon(color="red", icon="exclamation-circle")
+                    ).add_to(m)
+
+        return m
+
 # Streamlit Frontend
 def main():
     st.set_page_config(
@@ -793,8 +860,10 @@ def main():
 
 
     # Session states
+    if "view" not in st.session_state:
+        st.session_state.view = "chat"  # Options: "chat", "map"
     if "mode" not in st.session_state:
-        st.session_state.mode = "chat"
+        st.session_state.mode = "chat"  # Options: "chat", "disaster"
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     if "text_prompt" not in st.session_state:
@@ -820,18 +889,76 @@ def main():
         </div>
     """, unsafe_allow_html=True)
 
-    # Mode toggle button
-    _ , col2 = st.columns([8, 1])
+    # Create a more prominent toggle button with better styling
+    col1, col2 = st.columns([3, 1])
     with col2:
-        if st.button("🌍 Switch Chat Mode", use_container_width=True):
-            st.session_state.mode = "disaster" if st.session_state.mode == "chat" else "chat"
+        toggle_label = "Show Disaster Map" if st.session_state.view == "chat" else "Return to Chat"
+        if st.button(toggle_label, use_container_width=True, type="primary"):
+            # Toggle between chat and map view
+            st.session_state.view = "map" if st.session_state.view == "chat" else "chat"
+            # Force a rerun to update the UI
+            st.rerun()
 
-    # Initialize input
-    user_input = ""
+    # Map View
+    if st.session_state.view == "map":
+        map = Map()
+        # Fetch disaster data
+        with st.spinner("Loading disaster data..."):
+            disasters = map.fetch_ongoing_disasters()
 
-    # Main Chat Mode
-    if st.session_state.mode == "chat":
-        st.markdown("### 🤖 General Chat Mode")
+        # Create two columns: map on the left, list on the right
+        col1, col2 = st.columns([2, 1])
+
+        # Display map in the first column
+        with col1:
+            st.subheader("Map of Ongoing Disasters")
+            if disasters:
+                folium_map = map.create_disaster_map(disasters)
+                st_folium(folium_map, width=700, height=500)
+            else:
+                st.warning("No ongoing disasters found or unable to fetch data.")
+
+        # Display list of disasters in the second column
+        with col2:
+            st.subheader("List of Ongoing Disasters")
+            if disasters:
+                # Convert to DataFrame for better display
+                df = pd.DataFrame([
+                    {
+                        "Name": d["name"],
+                        "Type": d["type"],
+                        "Countries": ", ".join([c["name"] for c in d["countries"]]),
+                        "Date": d["date"],
+                        "Description": d["description"]
+                    }
+                    for d in disasters
+                ])
+                # Display table without index
+                st.dataframe(
+                    df[["Name", "Type", "Countries", "Date", "Description"]],
+                    hide_index=True,
+                    use_container_width=True
+                )
+                st.write(f"Total ongoing disasters: {len(disasters)}")
+            else:
+                st.info("No ongoing disasters to display.")
+
+
+    # Only show chat interface if we're in chat view
+    if st.session_state.view == "chat":
+        # Mode toggle button
+        _ , col2 = st.columns([8, 1])
+        with col2:
+            if st.button("🌍 Switch Chat Mode", use_container_width=True):
+                st.session_state.mode = "disaster" if st.session_state.mode == "chat" else "chat"
+                st.rerun()
+
+        # Initialize input
+        user_input = ""
+
+        # Main Chat Mode
+        if st.session_state.mode == "chat":
+            st.markdown("### 🤖 General Chat Mode")
 
         # Microphone Input
         with st.expander("🎙️ Speak Instead of Typing", expanded=True):
@@ -943,69 +1070,69 @@ def main():
             elif "last_pdf_files" in st.session_state and not st.session_state.last_pdf_files and not st.session_state.last_rag_sources:
                 st.info("No information sources available. Either no disaster was detected or no articles were fetched.")
 
-    # Disaster Info Mode
-    else:
-        st.markdown("### 🌍 Disaster Info Chat")
+        # Disaster Info Mode
+        else:
+            st.markdown("### 🌍 Disaster Info Chat")
 
-        # Initialize session state for disaster info mode
-        if "disaster_fetch_completed" not in st.session_state:
-            st.session_state.disaster_fetch_completed = False
+            # Initialize session state for disaster info mode
+            if "disaster_fetch_completed" not in st.session_state:
+                st.session_state.disaster_fetch_completed = False
 
-        if "current_disaster_descriptions" not in st.session_state:
-            st.session_state.current_disaster_descriptions = []
+            if "current_disaster_descriptions" not in st.session_state:
+                st.session_state.current_disaster_descriptions = []
 
-        st.markdown("Choose a disaster type:")
-        disaster_types = ["Earthquakes", "Floods", "Hurricane", "Wildfires", "Tornado", "Tsunami"]
-        selected_disaster_type = st.selectbox("Disaster Type", disaster_types)
-        st.markdown(f"**You selected:** {selected_disaster_type}")
+            st.markdown("Choose a disaster type:")
+            disaster_types = ["Earthquakes", "Floods", "Hurricane", "Wildfires", "Tornado", "Tsunami"]
+            selected_disaster_type = st.selectbox("Disaster Type", disaster_types)
+            st.markdown(f"**You selected:** {selected_disaster_type}")
 
-        if st.button("Fetch Disaster Tweets"):
-            with st.spinner("Fetching disaster tweets... This may take a while."):
-                try:
-                    twt = TweetScraper()
-                    success, disaster_descriptions = twt.process(selected_disaster_type)
+            if st.button("Fetch Disaster Tweets"):
+                with st.spinner("Fetching disaster tweets... This may take a while."):
+                    try:
+                        twt = TweetScraper()
+                        success, disaster_descriptions = twt.process(selected_disaster_type)
 
-                    if success:
-                        st.success("Data saved successfully!")
-                        # Store the descriptions in session state
-                        st.session_state.current_disaster_descriptions = disaster_descriptions
-                        st.session_state.disaster_fetch_completed = True
-                        # Force a rerun to update the UI
-                        st.rerun()
-                    else:
-                        st.error("An error occurred while saving the data.")
-                except Exception as e:
-                    st.error(f"An error occurred: {str(e)}")
-                    logger.error(f"Tweet scraping error: {e}")
+                        if success:
+                            st.success("Data saved successfully!")
+                            # Store the descriptions in session state
+                            st.session_state.current_disaster_descriptions = disaster_descriptions
+                            st.session_state.disaster_fetch_completed = True
+                            # Force a rerun to update the UI
+                            st.rerun()
+                        else:
+                            st.error("An error occurred while saving the data.")
+                    except Exception as e:
+                        st.error(f"An error occurred: {str(e)}")
+                        logger.error(f"Tweet scraping error: {e}")
 
-        # Only show disaster events after fetch is completed
-        if st.session_state.disaster_fetch_completed and st.session_state.current_disaster_descriptions:
-            st.subheader("Identified Disaster Events")
-            selected_disaster_event = st.selectbox("Select a disaster event to get more information",
-                                                 st.session_state.current_disaster_descriptions)
+            # Only show disaster events after fetch is completed
+            if st.session_state.disaster_fetch_completed and st.session_state.current_disaster_descriptions:
+                st.subheader("Identified Disaster Events")
+                selected_disaster_event = st.selectbox("Select a disaster event to get more information",
+                                                    st.session_state.current_disaster_descriptions)
 
-            if st.button("Get Articles About This Event"):
-                # Get or initialize orchestrator from session state
-                # Enter TAVILY API KEY HERE
-                api_key = ""
-                if "orchestrator" not in st.session_state:
-                    st.session_state.orchestrator = init_orchestrator(api_key)
+                if st.button("Get Articles About This Event"):
+                    # Get or initialize orchestrator from session state
+                    # Enter tavily api key
+                    api_key = ""
+                    if "orchestrator" not in st.session_state:
+                        st.session_state.orchestrator = init_orchestrator(api_key)
 
-                with st.spinner(f"Fetching and summarizing articles about {selected_disaster_event}..."):
-                    # Process the selected disaster event
-                    article_summaries = st.session_state.orchestrator.process_disaster_event(selected_disaster_event, max_articles=5)
+                    with st.spinner(f"Fetching and summarizing articles about {selected_disaster_event}..."):
+                        # Process the selected disaster event
+                        article_summaries = st.session_state.orchestrator.process_disaster_event(selected_disaster_event, max_articles=5)
 
-                    if article_summaries:
-                        st.subheader("Article Summaries")
-                        for i, summary in enumerate(article_summaries, 1):
-                            with st.expander(f"📰 {summary['title']}", expanded=i==1):
-                                st.markdown(f"**Summary:** {summary['summary']}")
-                                st.markdown(f"**Original Length:** {summary['original_length']} characters")
-                                st.markdown(f"[Read Full Article]({summary['url']})")
-                    else:
-                        st.info(f"No articles found about {selected_disaster_event}.")
-        elif st.session_state.disaster_fetch_completed and not st.session_state.current_disaster_descriptions:
-            st.info("No specific disaster events could be identified from the tweets.")
+                        if article_summaries:
+                            st.subheader("Article Summaries")
+                            for i, summary in enumerate(article_summaries, 1):
+                                with st.expander(f"📰 {summary['title']}", expanded=i==1):
+                                    st.markdown(f"**Summary:** {summary['summary']}")
+                                    st.markdown(f"**Original Length:** {summary['original_length']} characters")
+                                    st.markdown(f"[Read Full Article]({summary['url']})")
+                        else:
+                            st.info(f"No articles found about {selected_disaster_event}.")
+            elif st.session_state.disaster_fetch_completed and not st.session_state.current_disaster_descriptions:
+                st.info("No specific disaster events could be identified from the tweets.")
 
 
     # Footer
