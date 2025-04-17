@@ -341,7 +341,6 @@ class DisasterReportOrchestrator:
         analysis = self.analyzer.analyze(prompt, locations, time_info)
         logger.info(f"Analysis result: {json.dumps(analysis, indent=2)}")
         pdf_files = []
-        article_summaries = []
         if analysis["class_label"] == "disaster":
             query_parts = []
             query_parts.extend(analysis['location'])
@@ -363,33 +362,21 @@ class DisasterReportOrchestrator:
                 return analysis, pdf_files
 
             max_articles = len(articles) if max_articles is None else min(max_articles, len(articles))
-            if st.session_state.mode == "chat":
-                for i, article in enumerate(articles[:max_articles]):
-                    content = article.get('content', 'No content available')
-                    title = article.get('title', f"Article_{i+1}")
-                    result = self.pdf_generator.save_to_pdf(content, title, i)
-                    if result:
-                        pdf_files.append(result)
-                    else:
-                        logger.warning(f"PDF generation failed for {title}")
-            else:
-                for i, article in enumerate(articles[:max_articles]):
-                    content = article.get('content', 'No content available')
-                    title = article.get('title', f"Article_{i+1}")
-                    url = article.get('url', '#')
-
-                    # Summarize the article instead of creating a PDF
-                    summary_result = self.summarizer.summarize_article(content, title)
-                    summary_result['url'] = url  # Add the URL to the summary
-                    article_summaries.append(summary_result)
+            # Always generate PDFs in chat mode
+            for i, article in enumerate(articles[:max_articles]):
+                content = article.get('content', 'No content available')
+                title = article.get('title', f"Article_{i+1}")
+                result = self.pdf_generator.save_to_pdf(content, title, i)
+                if result:
+                    pdf_files.append(result)
+                else:
+                    logger.warning(f"PDF generation failed for {title}")
 
         else:
             logger.info("No disaster detected, skipping article fetching and PDF generation.")
 
-        if st.session_state.mode == "chat":
-            return analysis, pdf_files
-        else:
-            return analysis, article_summaries
+        # Always return PDF files in chat mode
+        return analysis, pdf_files
 
 
     def process_disaster_event(self, event_query: str, max_articles: int = 5) -> List[Dict]:
@@ -724,8 +711,12 @@ class TweetScraper:
 
 # Modified handle_enter function
 def handle_enter():
+    # Only process input in chat mode
+    if st.session_state.mode != "chat":
+        return
+
     current_text = st.session_state.text_prompt
-    # Enter Tavily API 
+    # Enter Tavily API
     api_key = ""
     max_articles = 5
 
@@ -739,35 +730,27 @@ def handle_enter():
 
     # Store the analysis results in session state instead of displaying immediately
     with st.spinner("Processing your request..."):
-        if st.session_state.mode == "chat":
-            # Process with orchestrator to get analysis and PDFs
-            analysis, pdf_files = st.session_state.orchestrator.process(current_text, max_articles)
+        # Process with orchestrator to get analysis and PDFs
+        analysis, pdf_files = st.session_state.orchestrator.process(current_text, max_articles)
 
-            # Store results in session state for later display
-            st.session_state.last_analysis = analysis
-            st.session_state.last_pdf_files = pdf_files
-            st.session_state.last_article_summaries = None
+        # Store results in session state for later display
+        st.session_state.last_analysis = analysis
+        st.session_state.last_pdf_files = pdf_files
+        st.session_state.last_article_summaries = None
 
-            # If PDFs were generated, add them to the RAG system and generate a response
-            if pdf_files and analysis["class_label"] == "disaster":
-                # Add PDFs to RAG system
-                for pdf_path, pdf_bytes in pdf_files:
-                    st.session_state.rag_system.add_pdf_to_vector_store(pdf_path, pdf_bytes)
+        # If PDFs were generated, add them to the RAG system and generate a response
+        if pdf_files and analysis["class_label"] == "disaster":
+            # Add PDFs to RAG system
+            for pdf_path, pdf_bytes in pdf_files:
+                st.session_state.rag_system.add_pdf_to_vector_store(pdf_path, pdf_bytes)
 
-                # Generate RAG response
-                rag_response, sources = st.session_state.rag_system.answer_query(current_text)
-                st.session_state.last_rag_response = rag_response
-                st.session_state.last_rag_sources = sources
-            else:
-                st.session_state.last_rag_response = None
-                st.session_state.last_rag_sources = None
+            # Generate RAG response
+            rag_response, sources = st.session_state.rag_system.answer_query(current_text)
+            st.session_state.last_rag_response = rag_response
+            st.session_state.last_rag_sources = sources
         else:
-            analysis, article_summaries = st.session_state.orchestrator.process(current_text, max_articles)
-            # Store results in session state for later display
-            st.session_state.last_analysis = analysis
-            st.session_state.last_pdf_files = None
-            st.session_state.last_article_summaries = article_summaries
-
+            st.session_state.last_rag_response = None
+            st.session_state.last_rag_sources = None
 
     if current_text.strip():
         # Add to chat history
@@ -960,118 +943,118 @@ def main():
         if st.session_state.mode == "chat":
             st.markdown("### 🤖 General Chat Mode")
 
-        # Microphone Input
-        with st.expander("🎙️ Speak Instead of Typing", expanded=True):
-            audio = AudioInput()
-            if st.button("Start Recording"):
-                global stop_recording, frames
-                stop_recording = False
-                frames = []
+            # Microphone Input
+            with st.expander("🎙️ Speak Instead of Typing", expanded=True):
+                audio = AudioInput()
+                if st.button("Start Recording"):
+                    global stop_recording, frames
+                    stop_recording = False
+                    frames = []
 
-                listener = keyboard.Listener(on_press=audio.on_press)
-                listener.start()
+                    listener = keyboard.Listener(on_press=audio.on_press)
+                    listener.start()
 
-                # Start recording in current thread
-                audio.record()
+                    # Start recording in current thread
+                    audio.record()
 
-                # Transcribe the audio
-                user_input = audio.transcribe_audio(WAVE_OUTPUT_PATH)
-                if user_input:
-                    existing_text = st.session_state.get("text_prompt", "")
-                    # Update the text prompt without directly modifying it after widget creation
-                    st.session_state.text_prompt = (existing_text + " " + user_input).strip()
-                    # Use rerun to refresh the UI with the new text
-                    st.rerun()
+                    # Transcribe the audio
+                    user_input = audio.transcribe_audio(WAVE_OUTPUT_PATH)
+                    if user_input:
+                        existing_text = st.session_state.get("text_prompt", "")
+                        # Update the text prompt without directly modifying it after widget creation
+                        st.session_state.text_prompt = (existing_text + " " + user_input).strip()
+                        # Use rerun to refresh the UI with the new text
+                        st.rerun()
 
-        st.markdown("💬 Type your message:")
-        col1, col2 = st.columns([5, 1])
+            st.markdown("💬 Type your message:")
+            col1, col2 = st.columns([5, 1])
 
-        # Check if we need to clear the input field
-        if st.session_state.clear_input:
-            st.session_state.text_prompt = ""
-            st.session_state.clear_input = False
+            # Check if we need to clear the input field
+            if st.session_state.clear_input:
+                st.session_state.text_prompt = ""
+                st.session_state.clear_input = False
 
-        with col1:
-            st.text_input("Enter Input", placeholder="Ask something...", key="text_prompt",
-                         label_visibility="collapsed", on_change=handle_enter)
+            with col1:
+                st.text_input("Enter Input", placeholder="Ask something...", key="text_prompt",
+                             label_visibility="collapsed", on_change=handle_enter)
 
-        with col2:
-            # Align the button better using HTML
-            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)  # Spacer to align
-            send_clicked = st.button("Send", use_container_width=True)
-            if send_clicked:
-                handle_enter()
-                st.rerun()  # Rerun the app to clear the input
+            with col2:
+                # Align the button better using HTML
+                st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)  # Spacer to align
+                send_clicked = st.button("Send", use_container_width=True)
+                if send_clicked:
+                    handle_enter()
+                    st.rerun()  # Rerun the app to clear the input
 
-        # Display chat history
-        st.markdown("### Chat History")
-        chat_pairs = list(zip(st.session_state.chat_history[::2], st.session_state.chat_history[1::2]))[::-1]
+            # Display chat history
+            st.markdown("### Chat History")
+            chat_pairs = list(zip(st.session_state.chat_history[::2], st.session_state.chat_history[1::2]))[::-1]
 
-        for user_msg, bot_msg in chat_pairs:
-            if user_msg[0] == "user":
-                st.markdown(f"<div style='background-color: black; padding: 10px; border-radius: 8px;'> <strong>You:</strong> {user_msg[1]} </div>", unsafe_allow_html=True)
-            if bot_msg[0] == "bot":
-                st.markdown(f"<div style='background-color: grey; padding: 10px; border-radius: 8px;'> <strong>Bot:</strong> {bot_msg[1]} </div>", unsafe_allow_html=True)
+            for user_msg, bot_msg in chat_pairs:
+                if user_msg[0] == "user":
+                    st.markdown(f"<div style='background-color: black; padding: 10px; border-radius: 8px;'> <strong>You:</strong> {user_msg[1]} </div>", unsafe_allow_html=True)
+                if bot_msg[0] == "bot":
+                    st.markdown(f"<div style='background-color: grey; padding: 10px; border-radius: 8px;'> <strong>Bot:</strong> {bot_msg[1]} </div>", unsafe_allow_html=True)
 
-        # Display analysis results and reports AFTER chat history
-        if "last_analysis" in st.session_state and st.session_state.last_analysis:
-            st.subheader("Analysis Results")
-            with st.expander("View Details", expanded=False):
-                col1, col2 = st.columns(2)
-                analysis = st.session_state.last_analysis
-                with col1:
-                    st.markdown(f"**Disaster Type:** {analysis['disaster_type']}")
-                    st.markdown(f"**Class Label:** {analysis['class_label']}")
-                    st.markdown(f"**Confidence:** {analysis['confidence']}")
-                with col2:
-                    st.markdown(f"**Locations:** {', '.join(analysis['location']) or 'None'}")
-                    st.markdown(f"**Time:** {', '.join(analysis['time']['structured_dates'])}")
-                    st.markdown(f"**Urgency:** {analysis['urgency']}")
-                    st.markdown(f"**Sentiment:** {analysis['sentiment']}")
+            # Display analysis results and reports AFTER chat history
+            if "last_analysis" in st.session_state and st.session_state.last_analysis:
+                st.subheader("Analysis Results")
+                with st.expander("View Details", expanded=False):
+                    col1, col2 = st.columns(2)
+                    analysis = st.session_state.last_analysis
+                    with col1:
+                        st.markdown(f"**Disaster Type:** {analysis['disaster_type']}")
+                        st.markdown(f"**Class Label:** {analysis['class_label']}")
+                        st.markdown(f"**Confidence:** {analysis['confidence']}")
+                    with col2:
+                        st.markdown(f"**Locations:** {', '.join(analysis['location']) or 'None'}")
+                        st.markdown(f"**Time:** {', '.join(analysis['time']['structured_dates'])}")
+                        st.markdown(f"**Urgency:** {analysis['urgency']}")
+                        st.markdown(f"**Sentiment:** {analysis['sentiment']}")
 
-            # Display RAG sources if available
-            if "last_rag_sources" in st.session_state and st.session_state.last_rag_sources:
-                st.subheader("Information Sources")
-                st.markdown("The response was generated based on the following sources:")
-                for source in st.session_state.last_rag_sources:
-                    st.markdown(f"- {source}")
+                # Display RAG sources if available
+                if "last_rag_sources" in st.session_state and st.session_state.last_rag_sources:
+                    st.subheader("Information Sources")
+                    st.markdown("The response was generated based on the following sources:")
+                    for source in st.session_state.last_rag_sources:
+                        st.markdown(f"- {source}")
 
-                # Still provide PDF downloads if available
-                if "last_pdf_files" in st.session_state and st.session_state.last_pdf_files:
-                    with st.expander("Download PDF Reports", expanded=False):
-                        for pdf_path, pdf_bytes in st.session_state.last_pdf_files:
-                            file_name = os.path.basename(pdf_path)
-                            st.download_button(
-                                label=f"Download {file_name}",
-                                data=pdf_bytes,
-                                file_name=file_name,
-                                mime="application/pdf"
-                            )
-            # Display PDF files if available but no RAG sources
-            elif "last_pdf_files" in st.session_state and st.session_state.last_pdf_files:
-                st.subheader("Generated Reports")
-                for pdf_path, pdf_bytes in st.session_state.last_pdf_files:
-                    file_name = os.path.basename(pdf_path)
-                    st.download_button(
-                        label=f"Download {file_name}",
-                        data=pdf_bytes,
-                        file_name=file_name,
-                        mime="application/pdf"
-                    )
-            # Display article summaries if available
-            elif "last_article_summaries" in st.session_state and st.session_state.last_article_summaries:
-                st.subheader("Article Summaries")
-                for i, summary in enumerate(st.session_state.last_article_summaries, 1):
-                    with st.expander(f"📰 {summary['title']}", expanded=i==1):
-                        st.markdown(f"**Summary:** {summary['summary']}")
-                        st.markdown(f"**Original Length:** {summary['original_length']} characters")
-                        st.markdown(f"[Read Full Article]({summary['url']})")
+                    # Still provide PDF downloads if available
+                    if "last_pdf_files" in st.session_state and st.session_state.last_pdf_files:
+                        with st.expander("Download PDF Reports", expanded=False):
+                            for pdf_path, pdf_bytes in st.session_state.last_pdf_files:
+                                file_name = os.path.basename(pdf_path)
+                                st.download_button(
+                                    label=f"Download {file_name}",
+                                    data=pdf_bytes,
+                                    file_name=file_name,
+                                    mime="application/pdf"
+                                )
+                # Display PDF files if available but no RAG sources
+                elif "last_pdf_files" in st.session_state and st.session_state.last_pdf_files:
+                    st.subheader("Generated Reports")
+                    for pdf_path, pdf_bytes in st.session_state.last_pdf_files:
+                        file_name = os.path.basename(pdf_path)
+                        st.download_button(
+                            label=f"Download {file_name}",
+                            data=pdf_bytes,
+                            file_name=file_name,
+                            mime="application/pdf"
+                        )
+                # Display article summaries if available
+                elif "last_article_summaries" in st.session_state and st.session_state.last_article_summaries:
+                    st.subheader("Article Summaries")
+                    for i, summary in enumerate(st.session_state.last_article_summaries, 1):
+                        with st.expander(f"📰 {summary['title']}", expanded=i==1):
+                            st.markdown(f"**Summary:** {summary['summary']}")
+                            st.markdown(f"**Original Length:** {summary['original_length']} characters")
+                            st.markdown(f"[Read Full Article]({summary['url']})")
 
-            elif "last_pdf_files" in st.session_state and not st.session_state.last_pdf_files and not st.session_state.last_rag_sources:
-                st.info("No information sources available. Either no disaster was detected or no articles were fetched.")
+                elif "last_pdf_files" in st.session_state and not st.session_state.last_pdf_files and not st.session_state.last_rag_sources:
+                    st.info("No information sources available. Either no disaster was detected or no articles were fetched.")
 
         # Disaster Info Mode
-        else:
+        else:  # st.session_state.mode == "disaster"
             st.markdown("### 🌍 Disaster Info Chat")
 
             # Initialize session state for disaster info mode
@@ -1142,7 +1125,6 @@ def main():
             All rights reserved.
         </div>
     """, unsafe_allow_html=True)
-
 
 if __name__ == "__main__":
     main()

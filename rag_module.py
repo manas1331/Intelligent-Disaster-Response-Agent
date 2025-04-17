@@ -18,6 +18,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+
 class RAGSystem:
     """
     Retrieval-Augmented Generation system for processing PDFs and answering questions
@@ -41,7 +43,7 @@ class RAGSystem:
 
         # Initialize embeddings
         self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
         )
 
         # Initialize text splitter
@@ -60,16 +62,19 @@ class RAGSystem:
 
     def _initialize_llm(self):
         """Initialize the local LLM for generating responses"""
+        hf_token = "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"
+        print("Hugging face token : " + hf_token)
         try:
             # Try to use Llama-3-8B-Instruct if available
             model_id = "meta-llama/Llama-3-8B-Instruct"
 
             logger.info(f"Loading LLM: {model_id}")
-            self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_id, token = hf_token)
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 device_map="auto",
-                torch_dtype=torch.float16
+                torch_dtype=torch.float16,
+                token = hf_token
             )
             logger.info("LLM loaded successfully")
         except Exception as e:
