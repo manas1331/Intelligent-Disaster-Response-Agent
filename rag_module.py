@@ -1,7 +1,9 @@
 import os
 import torch
-from typing import List, Dict, Tuple, Optional, Set
+from typing import List, Dict, Tuple, Optional, Set, Any, Callable, Union
 import logging
+import uuid
+from datetime import datetime
 from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -17,6 +19,44 @@ logging.basicConfig(
     force=True
 )
 logger = logging.getLogger(__name__)
+
+# Base Agent class for the agentic framework
+class Agent:
+    """Base Agent class for the agentic framework"""
+    def __init__(self, name: str):
+        self.name = name
+        self.message_queue = []
+        self.responses = {}
+        self.logger = logging.getLogger(f"Agent:{name}")
+        self.logger.info(f"Agent {name} initialized")
+
+    def process_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Process an incoming message and return a response"""
+        self.logger.info(f"Processing message: {message['message_type']}")
+        handler_name = f"handle_{message['message_type']}"
+        if hasattr(self, handler_name):
+            handler = getattr(self, handler_name)
+            return handler(message)
+        else:
+            self.logger.warning(f"No handler for message type: {message['message_type']}")
+            return {"status": "error", "error": f"No handler for message type: {message['message_type']}"}
+
+    def send_message(self, recipient: str, content: Dict[str, Any], message_type: str, request_id: str = None) -> Dict[str, Any]:
+        """Create a message to be sent to another agent"""
+        if request_id is None:
+            request_id = str(uuid.uuid4())
+
+        message = {
+            "sender": self.name,
+            "recipient": recipient,
+            "content": content,
+            "message_type": message_type,
+            "request_id": request_id,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        self.logger.info(f"Sending message to {recipient}: {message_type}")
+        return message
 
 
 
@@ -60,9 +100,50 @@ class RAGSystem:
 
         logger.info("RAG system initialized successfully")
 
+    def make_decision(self, query: str, context: List[Document]) -> Dict[str, Any]:
+        """Make a decision about how to respond to a query based on the retrieved context"""
+        # Analyze the query to determine intent
+        query_lower = query.lower()
+
+        # Check if query is about a specific disaster type
+        disaster_types = ["earthquake", "flood", "hurricane", "wildfire", "tornado", "tsunami"]
+        detected_disaster = next((dt for dt in disaster_types if dt in query_lower), None)
+
+        # Check if query is asking for specific information
+        is_asking_location = any(term in query_lower for term in ["where", "location", "place", "area", "region"])
+        is_asking_time = any(term in query_lower for term in ["when", "time", "date", "day", "month", "year"])
+        is_asking_impact = any(term in query_lower for term in ["impact", "effect", "damage", "casualties", "deaths"])
+        is_asking_response = any(term in query_lower for term in ["response", "aid", "help", "rescue", "relief"])
+
+        # Determine the focus of the response based on the query
+        focus = []
+        if detected_disaster:
+            focus.append(f"information about {detected_disaster}")
+        if is_asking_location:
+            focus.append("location information")
+        if is_asking_time:
+            focus.append("timing information")
+        if is_asking_impact:
+            focus.append("impact assessment")
+        if is_asking_response:
+            focus.append("response efforts")
+
+        # If no specific focus is detected, provide a general response
+        if not focus:
+            focus.append("general information")
+
+        return {
+            "detected_disaster": detected_disaster,
+            "focus": focus,
+            "is_asking_location": is_asking_location,
+            "is_asking_time": is_asking_time,
+            "is_asking_impact": is_asking_impact,
+            "is_asking_response": is_asking_response
+        }
+
     def _initialize_llm(self):
         """Initialize the local LLM for generating responses"""
-        hf_token = "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"
+        hf_token = ""
         print("Hugging face token : " + hf_token)
         try:
             # Try to use Llama-3-8B-Instruct if available
@@ -189,13 +270,13 @@ class RAGSystem:
         logger.info(f"Added {count} PDFs from {pdf_dir} to vector store")
         return count
 
-    def generate_prompt(self, query: str, context: str) -> str:
-        """Generate a prompt for the LLM"""
+    def generate_prompt(self, query: str, context: str, custom_instructions: str = "") -> str:
+        """Generate a prompt for the LLM with optional custom instructions"""
         return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 You are a helpful assistant specialized in disaster management and emergency response.
 Use the provided context to answer the user's question accurately and concisely.
 If the information is not in the context, say that you don't have enough information.
-
+{custom_instructions}
 <|start_header_id|>user<|end_header_id|>
 Context:
 {context}
@@ -248,15 +329,76 @@ Question: {query}
             if not docs:
                 return "I don't have enough information to answer that question.", []
 
+            # Make a decision about how to respond based on the query and context
+            decision = self.make_decision(query, docs)
+
+            # Customize the prompt based on the decision
+            custom_instructions = ""
+            if decision["focus"]:
+                custom_instructions = f"Focus on providing {', '.join(decision['focus'])}.\n"
+
             # Extract unique content and sources
             context = "\n\n".join([doc.page_content for doc in docs])
             sources = list(set([doc.metadata.get("source", "Unknown") for doc in docs]))
 
-            # Generate prompt and answer
-            prompt = self.generate_prompt(query, context)
+            # Generate prompt with custom instructions and answer
+            prompt = self.generate_prompt(query, context, custom_instructions)
             answer = self.generate_answer(prompt)
+
+            # Log the decision and response
+            logger.info(f"Query: {query}")
+            logger.info(f"Decision: {decision}")
+            logger.info(f"Generated response with focus on: {decision['focus']}")
 
             return answer, sources
         except Exception as e:
             logger.error(f"Error answering query: {e}")
             return f"I'm sorry, I encountered an error: {str(e)}", []
+
+# RAGSystemAgent Class
+class RAGSystemAgent(Agent):
+    """Agent wrapper for the RAG system"""
+    def __init__(self, initial_pdf_dir: str = "./RAG Pre-Info"):
+        super().__init__("RAGSystem")
+        self.rag_system = RAGSystem(initial_pdf_dir)
+        self.logger.info("RAGSystemAgent initialized")
+
+    def handle_add_pdf(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle a request to add a PDF to the vector store"""
+        pdf_path = message["content"].get("pdf_path", "")
+        pdf_bytes = message["content"].get("pdf_bytes", None)
+
+        success = self.rag_system.add_pdf_to_vector_store(pdf_path, pdf_bytes)
+
+        return {
+            "status": "success" if success else "error",
+            "message": f"Added PDF {pdf_path} to vector store" if success else f"Failed to add PDF {pdf_path} to vector store",
+            "request_id": message["request_id"]
+        }
+
+    def handle_query(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle a request to query the RAG system"""
+        query = message["content"].get("query", "")
+        k = message["content"].get("k", 5)
+
+        answer, sources = self.rag_system.answer_query(query, k)
+
+        return {
+            "status": "success",
+            "answer": answer,
+            "sources": sources,
+            "request_id": message["request_id"]
+        }
+
+    def handle_add_pdfs_from_directory(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle a request to add PDFs from a directory"""
+        pdf_dir = message["content"].get("pdf_dir", "")
+
+        count = self.rag_system.add_pdfs_from_directory(pdf_dir)
+
+        return {
+            "status": "success",
+            "count": count,
+            "message": f"Added {count} PDFs from {pdf_dir} to vector store",
+            "request_id": message["request_id"]
+        }

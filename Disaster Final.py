@@ -7,7 +7,7 @@ print(os.environ.get("STREAMLIT_SERVER_FILE_WATCHER_TYPE"))
 
 import time, csv, random, logging, requests, json, re, os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Set, Optional, Any, Callable, Union, Tuple
 import pandas as pd
 import streamlit as st
 import pyaudio
@@ -37,6 +37,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
+import uuid
 
 # Import RAG system
 from rag_module import RAGSystem
@@ -102,16 +103,106 @@ def init_text_preprocessor():
     nlp = spacy.load("en_core_web_sm")
     return {"nlp": nlp}
 
+# Agent Framework
+class Agent:
+    """Base Agent class for the agentic framework"""
+    def __init__(self, name: str):
+        self.name = name
+        self.message_queue = []
+        self.responses = {}
+        self.logger = logging.getLogger(f"Agent:{name}")
+        self.logger.info(f"Agent {name} initialized")
+
+    def process_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Process an incoming message and return a response"""
+        self.logger.info(f"Processing message: {message['message_type']}")
+        handler_name = f"handle_{message['message_type']}"
+        if hasattr(self, handler_name):
+            handler = getattr(self, handler_name)
+            return handler(message)
+        else:
+            self.logger.warning(f"No handler for message type: {message['message_type']}")
+            return {"status": "error", "error": f"No handler for message type: {message['message_type']}"}
+
+    def send_message(self, recipient: str, content: Dict[str, Any], message_type: str, request_id: str = None) -> Dict[str, Any]:
+        """Create a message to be sent to another agent"""
+        if request_id is None:
+            request_id = str(uuid.uuid4())
+
+        message = {
+            "sender": self.name,
+            "recipient": recipient,
+            "content": content,
+            "message_type": message_type,
+            "request_id": request_id,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        self.logger.info(f"Sending message to {recipient}: {message_type}")
+        return message
+
+# AgentFramework class to manage all agents
+class AgentFramework:
+    """Framework for managing agents and their communication"""
+    def __init__(self):
+        self.agents = {}
+        self.message_history = []
+        self.logger = logging.getLogger("AgentFramework")
+
+    def register_agent(self, agent: Agent) -> None:
+        """Register an agent with the framework"""
+        self.agents[agent.name] = agent
+        self.logger.info(f"Registered agent: {agent.name}")
+
+    def dispatch_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch a message to the appropriate agent and get the response"""
+        recipient = message["recipient"]
+        if recipient in self.agents:
+            self.message_history.append(message)
+            response = self.agents[recipient].process_message(message)
+            return response
+        else:
+            self.logger.error(f"Agent not found: {recipient}")
+            return {"status": "error", "error": f"Agent not found: {recipient}"}
+
+    def get_agent(self, name: str) -> Optional[Agent]:
+        """Get an agent by name"""
+        return self.agents.get(name)
+
+# Cache the AgentFramework initialization
+@st.cache_resource
+def init_agent_framework():
+    logger.info("Initializing Agent Framework")
+    return AgentFramework()
+
 # Cache the DisasterReportOrchestrator initialization
 @st.cache_resource
 def init_orchestrator(api_key: str):
     logger.info("Initializing DisasterReportOrchestrator")
-    preprocessor = TextPreprocessor()
-    analyzer = DisasterAnalyzer()
-    scraper = DataScraper(api_key)
-    pdf_generator = PDFGenerator()
-    summarizer = ArticleSummarizer(analyzer)
-    return DisasterReportOrchestrator(api_key, preprocessor, analyzer, scraper, pdf_generator, summarizer)
+    # Get or initialize the agent framework
+    framework = init_agent_framework()
+
+    # Create and register agents
+    preprocessor = TextPreprocessorAgent()
+    analyzer = DisasterAnalyzerAgent()
+    scraper = DataScraperAgent(api_key)
+    pdf_generator = PDFGeneratorAgent()
+    summarizer = ArticleSummarizerAgent(analyzer)
+    rag_system = RAGSystemAgent()
+
+    # Register all agents
+    framework.register_agent(preprocessor)
+    framework.register_agent(analyzer)
+    framework.register_agent(scraper)
+    framework.register_agent(pdf_generator)
+    framework.register_agent(summarizer)
+    framework.register_agent(rag_system)
+
+    # Create and register the orchestrator
+    orchestrator = DisasterReportOrchestratorAgent(api_key, framework)
+    framework.register_agent(orchestrator)
+
+    return orchestrator
 
 # Cache the RAG system initialization
 @st.cache_resource
@@ -149,6 +240,39 @@ class TextPreprocessor:
         text = self.preprocess(text)
         doc = self.nlp(text)
         return {ent.text for ent in doc.ents if ent.label_ in ["GPE", "LOC"]}
+
+# TextPreprocessorAgent Class
+class TextPreprocessorAgent(Agent):
+    def __init__(self):
+        super().__init__("TextPreprocessor")
+        self.preprocessor = TextPreprocessor()
+
+    def handle_preprocess(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        text = message["content"].get("text", "")
+        processed_text = self.preprocessor.preprocess(text)
+        return {
+            "status": "success",
+            "processed_text": processed_text,
+            "request_id": message["request_id"]
+        }
+
+    def handle_extract_time(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        text = message["content"].get("text", "")
+        time_info = self.preprocessor.extract_time(text)
+        return {
+            "status": "success",
+            "time_info": time_info,
+            "request_id": message["request_id"]
+        }
+
+    def handle_extract_locations(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        text = message["content"].get("text", "")
+        locations = self.preprocessor.extract_locations(text)
+        return {
+            "status": "success",
+            "locations": list(locations),
+            "request_id": message["request_id"]
+        }
 
 # DisasterAnalyzer Class
 class DisasterAnalyzer:
@@ -242,6 +366,84 @@ class DisasterAnalyzer:
             **disaster_classification
         }
 
+# DisasterAnalyzerAgent Class
+class DisasterAnalyzerAgent(Agent):
+    def __init__(self):
+        super().__init__("DisasterAnalyzer")
+        self.analyzer = DisasterAnalyzer()
+
+    def handle_summarize_text(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        text = message["content"].get("text", "")
+        max_length = message["content"].get("max_length", 150)
+        summary = self.analyzer.summarize_text(text, max_length)
+        return {
+            "status": "success",
+            "summary": summary,
+            "request_id": message["request_id"]
+        }
+
+    def handle_classify_urgency(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        text = message["content"].get("text", "")
+        urgency = self.analyzer.classify_urgency(text)
+        return {
+            "status": "success",
+            "urgency": urgency,
+            "request_id": message["request_id"]
+        }
+
+    def handle_classify_disaster(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        text = message["content"].get("text", "")
+        classification = self.analyzer.classify_disaster(text)
+        return {
+            "status": "success",
+            "classification": classification,
+            "request_id": message["request_id"]
+        }
+
+    def handle_analyze_sentiment(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        text = message["content"].get("text", "")
+        sentiment = self.analyzer.analyze_sentiment(text)
+        return {
+            "status": "success",
+            "sentiment": sentiment,
+            "request_id": message["request_id"]
+        }
+
+    def handle_detect_disaster_type(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        text = message["content"].get("text", "")
+        disaster_type = self.analyzer.detect_disaster_type(text)
+        return {
+            "status": "success",
+            "disaster_type": disaster_type,
+            "request_id": message["request_id"]
+        }
+
+    def handle_analyze(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        text = message["content"].get("text", "")
+        locations = set(message["content"].get("locations", []))
+        time_info = message["content"].get("time_info", {"structured_dates": ["Not specified"]})
+        analysis = self.analyzer.analyze(text, locations, time_info)
+        return {
+            "status": "success",
+            "analysis": analysis,
+            "request_id": message["request_id"]
+        }
+
+    def handle_summarize_article(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        content = message["content"].get("text", "")
+        title = message["content"].get("title", "")
+        full_text = f"{title}\n\n{content}"
+        summary = self.analyzer.summarize_text(full_text)
+        return {
+            "status": "success",
+            "summary": {
+                "title": title,
+                "summary": summary,
+                "original_length": len(content)
+            },
+            "request_id": message["request_id"]
+        }
+
 # DataScraper Class
 class DataScraper:
     def __init__(self, api_key: str):
@@ -273,6 +475,25 @@ class DataScraper:
             logger.error(f"Failed to fetch articles: {e}")
             return []
 
+# DataScraperAgent Class
+class DataScraperAgent(Agent):
+    def __init__(self, api_key: str):
+        super().__init__("DataScraper")
+        self.scraper = DataScraper(api_key)
+
+    def handle_fetch_articles(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        query = message["content"].get("query", "")
+        days = message["content"].get("days", 5)
+        max_results = message["content"].get("max_results", 15)
+
+        articles = self.scraper.fetch_articles(query, days, max_results)
+
+        return {
+            "status": "success",
+            "articles": articles,
+            "request_id": message["request_id"]
+        }
+
 
 # ArticleSummarizer Class
 class ArticleSummarizer:
@@ -301,6 +522,24 @@ class ArticleSummarizer:
                 "original_length": len(content)
             }
 
+# ArticleSummarizerAgent Class
+class ArticleSummarizerAgent(Agent):
+    def __init__(self, analyzer=None):
+        super().__init__("ArticleSummarizer")
+        self.summarizer = ArticleSummarizer(analyzer)
+
+    def handle_summarize_article(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        content = message["content"].get("content", "")
+        title = message["content"].get("title", "")
+
+        summary = self.summarizer.summarize_article(content, title)
+
+        return {
+            "status": "success",
+            "summary": summary,
+            "request_id": message["request_id"]
+        }
+
 # PDFGenerator Class
 class PDFGenerator:
     def save_to_pdf(self, content: str, title: str, index: int, output_dir: str = "pdfs") -> Optional[tuple[str, bytes]]:
@@ -321,6 +560,66 @@ class PDFGenerator:
         except Exception as e:
             logger.error(f"Failed to save PDF for {title}: {e}")
             return None
+
+# PDFGeneratorAgent Class
+class PDFGeneratorAgent(Agent):
+    def __init__(self):
+        super().__init__("PDFGenerator")
+        self.pdf_generator = PDFGenerator()
+
+    def handle_save_to_pdf(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        content = message["content"].get("content", "")
+        title = message["content"].get("title", "")
+        index = message["content"].get("index", 0)
+        output_dir = message["content"].get("output_dir", "pdfs")
+
+        result = self.pdf_generator.save_to_pdf(content, title, index, output_dir)
+
+        if result:
+            pdf_path, pdf_bytes = result
+            return {
+                "status": "success",
+                "pdf_path": pdf_path,
+                "pdf_bytes": pdf_bytes,
+                "request_id": message["request_id"]
+            }
+        else:
+            return {
+                "status": "error",
+                "error": f"Failed to save PDF for {title}",
+                "request_id": message["request_id"]
+            }
+
+# RAGSystemAgent Class
+class RAGSystemAgent(Agent):
+    def __init__(self):
+        super().__init__("RAGSystem")
+        self.rag_system = RAGSystem()
+
+    def handle_add_pdf(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        pdf_path = message["content"].get("pdf_path", "")
+        pdf_bytes = message["content"].get("pdf_bytes", None)
+
+        success = self.rag_system.add_pdf_to_vector_store(pdf_path, pdf_bytes)
+
+        return {
+            "status": "success" if success else "error",
+            "message": f"Added PDF {pdf_path} to vector store" if success else f"Failed to add PDF {pdf_path} to vector store",
+            "request_id": message["request_id"]
+        }
+
+    def handle_query(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        query = message["content"].get("query", "")
+        k = message["content"].get("k", 5)
+
+        answer, sources = self.rag_system.answer_query(query, k)
+
+        return {
+            "status": "success",
+            "answer": answer,
+            "sources": sources,
+            "request_id": message["request_id"]
+        }
 
 # DisasterReportOrchestrator Class
 class DisasterReportOrchestrator:
@@ -402,6 +701,210 @@ class DisasterReportOrchestrator:
             article_summaries.append(summary_result)
 
         return article_summaries
+
+# DisasterReportOrchestratorAgent Class
+class DisasterReportOrchestratorAgent(Agent):
+    def __init__(self, api_key: str, framework: AgentFramework):
+        super().__init__("DisasterReportOrchestrator")
+        self.api_key = api_key
+        self.framework = framework
+        logger.info("DisasterReportOrchestratorAgent initialized")
+
+    def handle_process(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = message["content"].get("prompt", "")
+        max_articles = message["content"].get("max_articles", None)
+        request_id = message["request_id"]
+
+        # Step 1: Extract locations and time information
+        locations_message = self.send_message(
+            recipient="TextPreprocessor",
+            content={"text": prompt},
+            message_type="extract_locations",
+            request_id=request_id
+        )
+        locations_response = self.framework.dispatch_message(locations_message)
+        locations = set(locations_response.get("locations", []))
+
+        time_message = self.send_message(
+            recipient="TextPreprocessor",
+            content={"text": prompt},
+            message_type="extract_time",
+            request_id=request_id
+        )
+        time_response = self.framework.dispatch_message(time_message)
+        time_info = time_response.get("time_info", {"structured_dates": ["Not specified"]})
+
+        # Step 2: Analyze the prompt
+        analyze_message = self.send_message(
+            recipient="DisasterAnalyzer",
+            content={
+                "text": prompt,
+                "locations": list(locations),
+                "time_info": time_info
+            },
+            message_type="analyze",
+            request_id=request_id
+        )
+        analyze_response = self.framework.dispatch_message(analyze_message)
+        analysis = analyze_response.get("analysis", {})
+
+        pdf_files = []
+        if analysis.get("class_label") == "disaster":
+            # Step 3: Build query and fetch articles
+            query_parts = []
+            query_parts.extend(analysis.get('location', []))
+            if analysis.get('disaster_type') != "Other/Unknown":
+                query_parts.append(analysis.get('disaster_type'))
+            for date_str in analysis.get('time', {}).get('structured_dates', []):
+                if date_str.lower() != "not specified":
+                    try:
+                        date_obj = datetime.fromisoformat(date_str)
+                        query_parts.append(date_obj.date().isoformat())
+                    except ValueError:
+                        pass
+
+            query = " ".join(query_parts)
+
+            fetch_message = self.send_message(
+                recipient="DataScraper",
+                content={
+                    "query": query,
+                    "max_results": max_articles or 15
+                },
+                message_type="fetch_articles",
+                request_id=request_id
+            )
+            fetch_response = self.framework.dispatch_message(fetch_message)
+            articles = fetch_response.get("articles", [])
+
+            if not articles:
+                logger.warning("No articles fetched, check API key or network.")
+                return {
+                    "status": "success",
+                    "analysis": analysis,
+                    "pdf_files": pdf_files,
+                    "request_id": request_id
+                }
+
+            # Step 4: Generate PDFs and add to RAG system
+            max_articles_to_process = len(articles) if max_articles is None else min(max_articles, len(articles))
+            for i, article in enumerate(articles[:max_articles_to_process]):
+                content = article.get('content', 'No content available')
+                title = article.get('title', f"Article_{i+1}")
+
+                pdf_message = self.send_message(
+                    recipient="PDFGenerator",
+                    content={
+                        "content": content,
+                        "title": title,
+                        "index": i
+                    },
+                    message_type="save_to_pdf",
+                    request_id=request_id
+                )
+                pdf_response = self.framework.dispatch_message(pdf_message)
+
+                if pdf_response.get("status") == "success":
+                    pdf_path = pdf_response.get("pdf_path")
+                    pdf_bytes = pdf_response.get("pdf_bytes")
+                    pdf_files.append((pdf_path, pdf_bytes))
+
+                    # Add to RAG system
+                    rag_message = self.send_message(
+                        recipient="RAGSystem",
+                        content={
+                            "pdf_path": pdf_path,
+                            "pdf_bytes": pdf_bytes
+                        },
+                        message_type="add_pdf",
+                        request_id=request_id
+                    )
+                    self.framework.dispatch_message(rag_message)
+                else:
+                    logger.warning(f"PDF generation failed for {title}")
+        else:
+            logger.info("No disaster detected, skipping article fetching and PDF generation.")
+
+        return {
+            "status": "success",
+            "analysis": analysis,
+            "pdf_files": pdf_files,
+            "request_id": request_id
+        }
+
+    def handle_process_disaster_event(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        event_query = message["content"].get("event_query", "")
+        max_articles = message["content"].get("max_articles", 5)
+        request_id = message["request_id"]
+
+        # Fetch articles
+        fetch_message = self.send_message(
+            recipient="DataScraper",
+            content={
+                "query": event_query,
+                "max_results": max_articles
+            },
+            message_type="fetch_articles",
+            request_id=request_id
+        )
+        fetch_response = self.framework.dispatch_message(fetch_message)
+        articles = fetch_response.get("articles", [])
+
+        article_summaries = []
+        if not articles:
+            logger.warning(f"No articles fetched for query: {event_query}")
+            return {
+                "status": "success",
+                "article_summaries": article_summaries,
+                "request_id": request_id
+            }
+
+        # Summarize each article
+        for i, article in enumerate(articles):
+            content = article.get('content', 'No content available')
+            title = article.get('title', f"Article_{i+1}")
+            url = article.get('url', '#')
+
+            summarize_message = self.send_message(
+                recipient="ArticleSummarizer",
+                content={
+                    "content": content,
+                    "title": title
+                },
+                message_type="summarize_article",
+                request_id=request_id
+            )
+            summarize_response = self.framework.dispatch_message(summarize_message)
+
+            if summarize_response.get("status") == "success":
+                summary_result = summarize_response.get("summary", {})
+                summary_result['url'] = url
+                article_summaries.append(summary_result)
+
+        return {
+            "status": "success",
+            "article_summaries": article_summaries,
+            "request_id": request_id
+        }
+
+    def handle_query_rag(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        query = message["content"].get("query", "")
+        request_id = message["request_id"]
+
+        rag_message = self.send_message(
+            recipient="RAGSystem",
+            content={"query": query},
+            message_type="query",
+            request_id=request_id
+        )
+        rag_response = self.framework.dispatch_message(rag_message)
+
+        return {
+            "status": "success",
+            "answer": rag_response.get("answer", ""),
+            "sources": rag_response.get("sources", []),
+            "request_id": request_id
+        }
 
 # AudioInput Class
 class AudioInput:
@@ -724,30 +1227,50 @@ def handle_enter():
     if "orchestrator" not in st.session_state:
         st.session_state.orchestrator = init_orchestrator(api_key)
 
-    # Get or initialize RAG system from session state
-    if "rag_system" not in st.session_state:
-        st.session_state.rag_system = init_rag_system()
-
     # Store the analysis results in session state instead of displaying immediately
     with st.spinner("Processing your request..."):
-        # Process with orchestrator to get analysis and PDFs
-        analysis, pdf_files = st.session_state.orchestrator.process(current_text, max_articles)
+        # Create a unique request ID for this interaction
+        request_id = str(uuid.uuid4())
+
+        # Process with orchestrator agent
+        process_message = st.session_state.orchestrator.send_message(
+            recipient="DisasterReportOrchestrator",
+            content={
+                "prompt": current_text,
+                "max_articles": max_articles
+            },
+            message_type="process",
+            request_id=request_id
+        )
+
+        # Get the framework from the orchestrator
+        framework = st.session_state.orchestrator.framework
+
+        # Dispatch the message to the orchestrator agent
+        process_response = framework.dispatch_message(process_message)
+
+        # Extract results
+        analysis = process_response.get("analysis", {})
+        pdf_files = process_response.get("pdf_files", [])
 
         # Store results in session state for later display
         st.session_state.last_analysis = analysis
         st.session_state.last_pdf_files = pdf_files
         st.session_state.last_article_summaries = None
 
-        # If PDFs were generated, add them to the RAG system and generate a response
-        if pdf_files and analysis["class_label"] == "disaster":
-            # Add PDFs to RAG system
-            for pdf_path, pdf_bytes in pdf_files:
-                st.session_state.rag_system.add_pdf_to_vector_store(pdf_path, pdf_bytes)
-
+        # If PDFs were generated and it's a disaster, query the RAG system
+        if pdf_files and analysis.get("class_label") == "disaster":
             # Generate RAG response
-            rag_response, sources = st.session_state.rag_system.answer_query(current_text)
-            st.session_state.last_rag_response = rag_response
-            st.session_state.last_rag_sources = sources
+            rag_message = st.session_state.orchestrator.send_message(
+                recipient="DisasterReportOrchestrator",
+                content={"query": current_text},
+                message_type="query_rag",
+                request_id=request_id
+            )
+            rag_response = framework.dispatch_message(rag_message)
+
+            st.session_state.last_rag_response = rag_response.get("answer", "")
+            st.session_state.last_rag_sources = rag_response.get("sources", [])
         else:
             st.session_state.last_rag_response = None
             st.session_state.last_rag_sources = None
@@ -1102,8 +1625,28 @@ def main():
                         st.session_state.orchestrator = init_orchestrator(api_key)
 
                     with st.spinner(f"Fetching and summarizing articles about {selected_disaster_event}..."):
-                        # Process the selected disaster event
-                        article_summaries = st.session_state.orchestrator.process_disaster_event(selected_disaster_event, max_articles=5)
+                        # Create a unique request ID for this interaction
+                        request_id = str(uuid.uuid4())
+
+                        # Process the selected disaster event using the agent framework
+                        process_message = st.session_state.orchestrator.send_message(
+                            recipient="DisasterReportOrchestrator",
+                            content={
+                                "event_query": selected_disaster_event,
+                                "max_articles": 5
+                            },
+                            message_type="process_disaster_event",
+                            request_id=request_id
+                        )
+
+                        # Get the framework from the orchestrator
+                        framework = st.session_state.orchestrator.framework
+
+                        # Dispatch the message to the orchestrator agent
+                        process_response = framework.dispatch_message(process_message)
+
+                        # Extract article summaries
+                        article_summaries = process_response.get("article_summaries", [])
 
                         if article_summaries:
                             st.subheader("Article Summaries")
